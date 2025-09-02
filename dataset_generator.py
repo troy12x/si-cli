@@ -173,22 +173,54 @@ class DatasetGenerator:
     
     def _create_system_prompt(self) -> str:
         """Create the system prompt for the model."""
+        # Extract variables from templates
+        import re
+        input_vars = re.findall(r'\{([^}]+)\}', self.input_template)
+        output_vars = re.findall(r'\{([^}]+)\}', self.output_template)
+        all_vars = list(set(input_vars + output_vars))
+        
+        var_instructions = ""
+        if all_vars:
+            var_instructions = f"""
+
+Template Variables:
+Your templates contain these variables: {', '.join(all_vars)}
+For each variable like {{variable_name}}, you must:
+1. Think of what that variable should represent based on the topic "{self.topic}"
+2. Replace it with appropriate, specific content
+3. Make sure the content fits naturally in the sentence
+4. Vary the content for each generation to create diversity
+
+For example:
+- {{task}} could be "create a list", "handle exceptions", "parse JSON", etc.
+- {{concept}} could be "inheritance", "recursion", "lambda functions", etc.
+- {{error}} could be "TypeError", "IndexError", "KeyError", etc.
+- {{action}} could be "running my script", "importing a module", "calling a function", etc.
+
+Always replace ALL variables with concrete, specific content related to "{self.topic}"."""
+        
         return f"""You are a synthetic dataset generator. Your task is to generate training data for a conversational AI system.
 
 Topic: {self.topic}
 
 Instructions:
 1. Generate content that is relevant to the topic: "{self.topic}"
-2. Follow the input template exactly for the user's request
-3. Follow the output template exactly for the assistant's response
-4. Generate text only, no extra formatting
-5. Make the content unique and varied
-6. Ensure high quality and realistic conversations
+2. Use the input template as a guide for the user's request
+3. Use the output template as a guide for the assistant's response
+4. Replace ALL template variables {{variable}} with specific, concrete content
+5. Generate text only, no extra formatting or role labels
+6. Make the content unique, varied, and realistic
+7. Ensure high quality conversations that would be useful for training{var_instructions}
 
 Input Template: {self.input_template}
 Output Template: {self.output_template}
 
-Generate one complete conversation pair (user request + assistant response) that follows these templates and relates to the topic."""
+Generate one complete conversation pair following this format:
+
+User: [Generated user message based on input template with variables filled]
+Assistant: [Generated assistant response based on output template with variables filled]
+
+Make sure to replace all {{variables}} with actual content related to "{self.topic}"."""
     
     def _extract_conversation_pair(self, generated_text: str) -> Optional[Tuple[str, str]]:
         """Extract user and assistant content from generated text."""
@@ -206,17 +238,22 @@ Generate one complete conversation pair (user request + assistant response) that
                 if not line:
                     continue
                 
-                # Check for role indicators
-                if line.lower().startswith(('user:', 'human:', 'question:')):
+                # Check for role indicators (more flexible matching)
+                line_lower = line.lower()
+                if any(line_lower.startswith(prefix) for prefix in ['user:', 'human:', 'question:', 'q:']):
                     if current_role == 'assistant' and current_content:
                         assistant_content = '\n'.join(current_content).strip()
                     current_role = 'user'
-                    current_content = [line.split(':', 1)[1].strip() if ':' in line else line]
-                elif line.lower().startswith(('assistant:', 'ai:', 'answer:', 'response:')):
+                    # Extract content after the colon
+                    content = line.split(':', 1)[1].strip() if ':' in line else line
+                    current_content = [content] if content else []
+                elif any(line_lower.startswith(prefix) for prefix in ['assistant:', 'ai:', 'answer:', 'response:', 'a:']):
                     if current_role == 'user' and current_content:
                         user_content = '\n'.join(current_content).strip()
                     current_role = 'assistant'
-                    current_content = [line.split(':', 1)[1].strip() if ':' in line else line]
+                    # Extract content after the colon
+                    content = line.split(':', 1)[1].strip() if ':' in line else line
+                    current_content = [content] if content else []
                 else:
                     if current_role:
                         current_content.append(line)
@@ -227,18 +264,26 @@ Generate one complete conversation pair (user request + assistant response) that
             elif current_role == 'user' and current_content:
                 user_content = '\n'.join(current_content).strip()
             
-            # If we couldn't parse roles, try to split the text in half
+            # If we couldn't parse roles, try different splitting strategies
             if not user_content or not assistant_content:
+                # Try splitting by double newlines first
                 text_parts = generated_text.strip().split('\n\n')
                 if len(text_parts) >= 2:
                     user_content = text_parts[0].strip()
                     assistant_content = '\n\n'.join(text_parts[1:]).strip()
+                else:
+                    # Try splitting by single newlines and take first two non-empty parts
+                    parts = [part.strip() for part in generated_text.strip().split('\n') if part.strip()]
+                    if len(parts) >= 2:
+                        user_content = parts[0]
+                        assistant_content = '\n'.join(parts[1:])
             
             # Clean up the content
             user_content = self._clean_content(user_content)
             assistant_content = self._clean_content(assistant_content)
             
-            if user_content and assistant_content:
+            # Validate that we have meaningful content
+            if user_content and assistant_content and len(user_content) > 5 and len(assistant_content) > 5:
                 return user_content, assistant_content
             
             return None
@@ -250,15 +295,25 @@ Generate one complete conversation pair (user request + assistant response) that
     
     def _clean_content(self, content: str) -> str:
         """Clean and format content."""
-        # Remove common prefixes
-        prefixes = ['user:', 'assistant:', 'human:', 'ai:', 'question:', 'answer:', 'response:']
+        # Remove common prefixes (case insensitive)
+        prefixes = ['user:', 'assistant:', 'human:', 'ai:', 'question:', 'answer:', 'response:', 'q:', 'a:']
         content = content.strip()
         
         for prefix in prefixes:
-            if content.lower().startswith(prefix):
+            if content.lower().startswith(prefix.lower()):
                 content = content[len(prefix):].strip()
         
-        # Remove extra whitespace
+        # Remove quotes if they wrap the entire content
+        if content.startswith('"') and content.endswith('"'):
+            content = content[1:-1].strip()
+        elif content.startswith("'") and content.endswith("'"):
+            content = content[1:-1].strip()
+        
+        # Remove extra whitespace and normalize
+        content = re.sub(r'\s+', ' ', content).strip()
+        
+        # Remove any remaining template variables that weren't filled
+        content = re.sub(r'\{[^}]*\}', '', content)
         content = re.sub(r'\s+', ' ', content).strip()
         
         return content

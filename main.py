@@ -7,33 +7,116 @@ A tool for generating synthetic datasets using open-source models like Qwen-3-4B
 import click
 import json
 import hashlib
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt, IntPrompt, Confirm
 from dataset_generator import DatasetGenerator
 
 console = Console()
 
-@click.command()
-@click.option('--topic', '-t', required=True, help='Overall topic for the dataset generation')
-@click.option('--input-template', '-i', required=True, help='Template for user input messages')
-@click.option('--output-template', '-o', required=True, help='Template for assistant output messages')
-@click.option('--model', '-m', default='Qwen/Qwen2.5-3B-Instruct', help='Model to use for generation')
-@click.option('--output-file', '-f', default='dataset.json', help='Output file for the generated dataset')
-@click.option('--num-entries', '-n', default=1, help='Number of dataset entries to generate')
-@click.option('--max-tokens', default=512, help='Maximum new tokens to generate per entry')
-@click.option('--batch-size', '-b', default=1, help='Batch size for parallel generation (multi-GPU)')
-@click.option('--use-multi-gpu/--no-multi-gpu', default=True, help='Enable/disable multi-GPU support')
-@click.option('--max-gpus', type=int, help='Maximum number of GPUs to use')
-@click.option('--existing-file', '-e', help='Path to existing dataset file to avoid duplicates')
-@click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
-def generate(topic: str, input_template: str, output_template: str, model: str, 
-            output_file: str, num_entries: int, max_tokens: int, batch_size: int, use_multi_gpu: bool, 
-            max_gpus: Optional[int], existing_file: Optional[str], verbose: bool):
-    """Generate synthetic dataset entries using an open-source language model with multi-GPU support."""
+def interactive_generate():
+    """Run the generator in interactive mode with prompts."""
+    console.print("[bold blue]🤖 Synthetic Dataset Generator - Interactive Mode[/bold blue]")
+    console.print("[dim]Answer the following questions to generate your dataset:[/dim]\n")
     
-    console.print(f"[bold blue]Synthetic Dataset Generator[/bold blue]")
+    # Get topic
+    topic = Prompt.ask("[cyan]📝 What topic should the dataset focus on?[/cyan]", 
+                      default="Python programming")
+    
+    # Get input template with examples
+    console.print("\n[yellow]💡 Input Template Examples:[/yellow]")
+    console.print("  • How do I {task} in Python?")
+    console.print("  • What is {concept} and how does it work?")
+    console.print("  • Explain {topic} with examples")
+    console.print("  • I'm getting {error} when {action}. How to fix?")
+    
+    input_template = Prompt.ask("\n[cyan]📥 Enter your input template (use {variable} for placeholders)[/cyan]",
+                               default="How do I {task} in Python?")
+    
+    # Get output template with examples
+    console.print("\n[yellow]💡 Output Template Examples:[/yellow]")
+    console.print("  • Here's how to {task} in Python: {explanation}")
+    console.print("  • {concept} is {definition}. Here's how it works: {details}")
+    console.print("  • {topic} can be explained as: {explanation}")
+    console.print("  • This {error} occurs because {cause}. Solution: {fix}")
+    
+    output_template = Prompt.ask("\n[cyan]📤 Enter your output template (use {variable} for placeholders)[/cyan]",
+                                default="Here's how to {task} in Python: {explanation}")
+    
+    # Get number of entries
+    num_entries = IntPrompt.ask("\n[cyan]🔢 How many dataset entries do you want to generate?[/cyan]", 
+                               default=5)
+    
+    # Get max tokens
+    max_tokens = IntPrompt.ask("[cyan]⚡ Maximum new tokens per entry?[/cyan]", 
+                              default=512)
+    
+    # Get model choice
+    console.print("\n[yellow]🤖 Available Models:[/yellow]")
+    console.print("  1. Qwen/Qwen2.5-3B-Instruct (Default - Fast)")
+    console.print("  2. Qwen/Qwen2.5-7B-Instruct (Better quality)")
+    console.print("  3. Custom model")
+    
+    model_choice = Prompt.ask("[cyan]Choose model (1/2/3)[/cyan]", default="1")
+    
+    if model_choice == "2":
+        model = "Qwen/Qwen2.5-7B-Instruct"
+    elif model_choice == "3":
+        model = Prompt.ask("[cyan]Enter custom model name[/cyan]")
+    else:
+        model = "Qwen/Qwen2.5-3B-Instruct"
+    
+    # Get batch size for multi-GPU
+    batch_size = IntPrompt.ask("[cyan]🚀 Batch size for parallel generation?[/cyan]", 
+                              default=2)
+    
+    # Get output file
+    output_file = Prompt.ask("[cyan]💾 Output filename?[/cyan]", 
+                            default="dataset.json")
+    
+    # Ask about verbose mode
+    verbose = Confirm.ask("[cyan]🔍 Enable verbose output?[/cyan]", default=False)
+    
+    # Show summary
+    console.print("\n[bold green]📋 Generation Summary:[/bold green]")
+    console.print(f"Topic: [green]{topic}[/green]")
+    console.print(f"Model: [yellow]{model}[/yellow]")
+    console.print(f"Input template: [blue]{input_template}[/blue]")
+    console.print(f"Output template: [blue]{output_template}[/blue]")
+    console.print(f"Entries: [cyan]{num_entries}[/cyan]")
+    console.print(f"Max tokens: [cyan]{max_tokens}[/cyan]")
+    console.print(f"Batch size: [cyan]{batch_size}[/cyan]")
+    console.print(f"Output file: [magenta]{output_file}[/magenta]")
+    
+    if not Confirm.ask("\n[bold yellow]🚀 Start generation?[/bold yellow]", default=True):
+        console.print("[red]❌ Generation cancelled.[/red]")
+        return
+    
+    # Call the generation function
+    generate_dataset(
+        topic=topic,
+        input_template=input_template,
+        output_template=output_template,
+        model=model,
+        output_file=output_file,
+        num_entries=num_entries,
+        max_tokens=max_tokens,
+        batch_size=batch_size,
+        use_multi_gpu=True,
+        max_gpus=None,
+        existing_file=None,
+        verbose=verbose
+    )
+
+def generate_dataset(topic: str, input_template: str, output_template: str, model: str, 
+                    output_file: str, num_entries: int, max_tokens: int, batch_size: int, 
+                    use_multi_gpu: bool, max_gpus: Optional[int], existing_file: Optional[str], 
+                    verbose: bool):
+    """Core dataset generation function."""
+    console.print(f"\n[bold blue]🚀 Starting Dataset Generation[/bold blue]")
     console.print(f"Topic: [green]{topic}[/green]")
     console.print(f"Model: [yellow]{model}[/yellow]")
     console.print(f"Entries to generate: [cyan]{num_entries}[/cyan]")
@@ -132,6 +215,45 @@ def generate(topic: str, input_template: str, output_template: str, model: str,
         console.print("[red]No entries were generated[/red]")
 
 @click.command()
+@click.option('--topic', '-t', help='Overall topic for the dataset generation')
+@click.option('--input-template', '-i', help='Template for user input messages')
+@click.option('--output-template', '-o', help='Template for assistant output messages')
+@click.option('--model', '-m', default='Qwen/Qwen2.5-3B-Instruct', help='Model to use for generation')
+@click.option('--output-file', '-f', default='dataset.json', help='Output file for the generated dataset')
+@click.option('--num-entries', '-n', default=1, help='Number of dataset entries to generate')
+@click.option('--max-tokens', default=512, help='Maximum new tokens to generate per entry')
+@click.option('--batch-size', '-b', default=1, help='Batch size for parallel generation (multi-GPU)')
+@click.option('--use-multi-gpu/--no-multi-gpu', default=True, help='Enable/disable multi-GPU support')
+@click.option('--max-gpus', type=int, help='Maximum number of GPUs to use')
+@click.option('--existing-file', '-e', help='Path to existing dataset file to avoid duplicates')
+@click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
+def generate(topic: Optional[str], input_template: Optional[str], output_template: Optional[str], model: str, 
+            output_file: str, num_entries: int, max_tokens: int, batch_size: int, use_multi_gpu: bool, 
+            max_gpus: Optional[int], existing_file: Optional[str], verbose: bool):
+    """Generate synthetic dataset entries using an open-source language model with multi-GPU support."""
+    
+    # If no topic provided, run in interactive mode
+    if not topic or not input_template or not output_template:
+        interactive_generate()
+        return
+    
+    # Call the core generation function
+    generate_dataset(
+        topic=topic,
+        input_template=input_template,
+        output_template=output_template,
+        model=model,
+        output_file=output_file,
+        num_entries=num_entries,
+        max_tokens=max_tokens,
+        batch_size=batch_size,
+        use_multi_gpu=use_multi_gpu,
+        max_gpus=max_gpus,
+        existing_file=existing_file,
+        verbose=verbose
+    )
+
+@click.command()
 @click.option('--file', '-f', required=True, help='Dataset file to validate')
 def validate(file: str):
     """Validate a dataset file format."""
@@ -184,4 +306,8 @@ cli.add_command(generate)
 cli.add_command(validate)
 
 if __name__ == '__main__':
-    cli()
+    # If no arguments provided, run in interactive mode
+    if len(sys.argv) == 1:
+        interactive_generate()
+    else:
+        cli()
