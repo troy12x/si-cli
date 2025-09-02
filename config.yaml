@@ -1,0 +1,34 @@
+# Synthetic Dataset Generator Configuration
+
+# Default model settings
+model:
+  name: "Qwen/Qwen2.5-3B-Instruct"
+  temperature: 0.8
+  max_new_tokens: 512
+  top_p: 0.9
+  do_sample: true
+
+# Generation settings
+generation:
+  max_retries: 3
+  batch_size: 1
+  default_entries: 1
+
+# Output settings
+output:
+  default_file: "dataset.json"
+  indent: 2
+  ensure_ascii: false
+
+# Validation settings
+validation:
+  check_uniqueness: true
+  min_content_length: 10
+  max_content_length: 2000
+
+# Supported models (add more as needed)
+supported_models:
+  - "Qwen/Qwen2.5-3B-Instruct"
+  - "Qwen/Qwen2.5-7B-Instruct"
+  - "microsoft/DialoGPT-medium"
+  - "facebook/blenderbot-400M-distill"
