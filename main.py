@@ -21,54 +21,21 @@ console = Console()
 @click.option('--output-template', '-o', required=True, help='Template for assistant output messages')
 @click.option('--model', '-m', default='Qwen/Qwen2.5-3B-Instruct', help='Model to use for generation')
 @click.option('--output-file', '-f', default='dataset.json', help='Output file for the generated dataset')
-@click.option('--num-entries', '-n', default=None, help='Number of dataset entries to generate')
-@click.option('--max-tokens', default=None, help='Maximum new tokens to generate per entry')
+@click.option('--num-entries', '-n', default=1, help='Number of dataset entries to generate')
+@click.option('--max-tokens', default=512, help='Maximum new tokens to generate per entry')
 @click.option('--batch-size', '-b', default=1, help='Batch size for parallel generation (multi-GPU)')
 @click.option('--use-multi-gpu/--no-multi-gpu', default=True, help='Enable/disable multi-GPU support')
 @click.option('--max-gpus', type=int, help='Maximum number of GPUs to use')
 @click.option('--existing-file', '-e', help='Path to existing dataset file to avoid duplicates')
-@click.option('--interactive', '-I', is_flag=True, help='Run in interactive mode with prompts')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def generate(topic: str, input_template: str, output_template: str, model: str, 
-            output_file: str, num_entries: Optional[int], max_tokens: Optional[int], batch_size: int, use_multi_gpu: bool, 
-            max_gpus: Optional[int], existing_file: Optional[str], interactive: bool, verbose: bool):
+            output_file: str, num_entries: int, max_tokens: int, batch_size: int, use_multi_gpu: bool, 
+            max_gpus: Optional[int], existing_file: Optional[str], verbose: bool):
     """Generate synthetic dataset entries using an open-source language model with multi-GPU support."""
     
     console.print(f"[bold blue]Synthetic Dataset Generator[/bold blue]")
     console.print(f"Topic: [green]{topic}[/green]")
     console.print(f"Model: [yellow]{model}[/yellow]")
-    
-    # Interactive prompts if enabled or values not provided
-    if interactive or num_entries is None:
-        if num_entries is None:
-            while True:
-                try:
-                    num_entries = int(console.input("[cyan]How many samples do you want to generate? [/cyan]"))
-                    if num_entries > 0:
-                        break
-                    else:
-                        console.print("[red]Please enter a positive number[/red]")
-                except ValueError:
-                    console.print("[red]Please enter a valid number[/red]")
-    
-    if interactive or max_tokens is None:
-        if max_tokens is None:
-            while True:
-                try:
-                    max_tokens = int(console.input("[cyan]Max new tokens per entry (default 512): [/cyan]") or "512")
-                    if max_tokens > 0:
-                        break
-                    else:
-                        console.print("[red]Please enter a positive number[/red]")
-                except ValueError:
-                    console.print("[red]Please enter a valid number[/red]")
-    
-    # Set defaults if still None
-    if num_entries is None:
-        num_entries = 1
-    if max_tokens is None:
-        max_tokens = 512
-    
     console.print(f"Entries to generate: [cyan]{num_entries}[/cyan]")
     console.print(f"Max tokens per entry: [cyan]{max_tokens}[/cyan]")
     console.print(f"Batch size: [cyan]{batch_size}[/cyan]")
