@@ -117,9 +117,14 @@ class DatasetGenerator:
                 console.print(f"[yellow]Loading model: {self.model_name}[/yellow]")
             
             # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        
+            # Set pad token if not exists
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
+        
+            # Check if model supports chat template
+            self.supports_chat_template = hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None
             
             # Determine device and dtype
             if self.device_info['available_gpus'] > 0:
@@ -199,15 +204,12 @@ class DatasetGenerator:
         if all_vars:
             var_instructions = f"""
 
-Template Variables:
-Your templates contain these variables: {', '.join(all_vars)}
-For each variable like {{variable_name}}, you must:
-1. Replace it with appropriate, specific content based on the descriptions below
-2. Make sure the content fits naturally in the sentence
-3. Vary the content for each generation to create diversity
-4. Keep content relevant to the topic "{self.topic}"
+IMPORTANT: Replace template variables naturally with specific content. Do NOT explain what you're doing or mention templates.
 
-Variable Descriptions:"""
+Variables to replace: {', '.join(all_vars)}
+Topic: {self.topic}
+
+Variable meanings:"""
             
             # Add user-provided descriptions or defaults
             for var in all_vars:
@@ -232,28 +234,36 @@ Variable Descriptions:"""
             
             var_instructions += f"\n\nAlways replace ALL variables with concrete, specific content. Make each generation unique and varied."
         
-        return f"""You are a synthetic dataset generator. Your task is to generate training data for a conversational AI system.
+        base_instruction = f"""
+Generate exactly one realistic conversation about {self.topic}.
 
-Topic: {self.topic}
+Format:
+User: [question/request following pattern: "{self.input_template}"]
+Assistant: [helpful response following pattern: "{self.output_template}"]
+{var_instructions}
 
-Instructions:
-1. Generate content that is relevant to the topic: "{self.topic}"
-2. Use the input template as a guide for the user's request
-3. Use the output template as a guide for the assistant's response
-4. Replace ALL template variables {{variable}} with specific, concrete content
-5. Generate text only, no extra formatting or role labels
-6. Make the content unique, varied, and realistic
-7. Ensure high quality conversations that would be useful for training{var_instructions}
-
-Input Template: {self.input_template}
-Output Template: {self.output_template}
-
-Generate one complete conversation pair following this format:
-
-User: [Generated user message based on input template with variables filled]
-Assistant: [Generated assistant response based on output template with variables filled]
-
-Make sure to replace all {{variables}} with actual content according to their descriptions above."""
+Rules:
+- Replace ALL {{variables}} with specific, natural content
+- Make conversation realistic and helpful
+- Do NOT mention templates, variables, or generation process
+- Keep responses focused and practical
+- Vary content for diversity""".strip()
+        
+        # Use chat template if supported, otherwise use system prompt
+        if self.supports_chat_template:
+            messages = [
+                {"role": "system", "content": base_instruction},
+                {"role": "user", "content": "Generate one conversation pair now."}
+            ]
+            system_prompt = self.tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
+        else:
+            system_prompt = base_instruction
+        
+        return system_prompt
     
     def _extract_conversation_pair(self, generated_text: str) -> Optional[Tuple[str, str]]:
         """Extract user and assistant content from generated text."""
@@ -388,7 +398,8 @@ Make sure to replace all {{variables}} with actual content according to their de
                     do_sample=True,
                     top_p=0.9,
                     pad_token_id=self.tokenizer.eos_token_id,
-                    batch_size=min(batch_size, 4)  # Limit batch size to prevent OOM
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    return_full_text=False
                 )
                 
                 # Handle both single response and batch responses
@@ -465,7 +476,9 @@ Make sure to replace all {{variables}} with actual content according to their de
                     temperature=0.8,
                     do_sample=True,
                     top_p=0.9,
-                    pad_token_id=self.tokenizer.eos_token_id
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    return_full_text=False
                 )
                 
                 generated_text = response[0]['generated_text']

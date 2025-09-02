@@ -302,7 +302,7 @@ def generate_dataset(topic: str, input_template: str, output_template: str, mode
                 # Add successful entries
                 for entry in batch_entries:
                     if entry:
-                        generated_entries.extend(entry)
+                        generated_entries.append(entry)
                         entries_generated += 1
                 
                 progress.update(task, advance=1, 
