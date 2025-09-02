@@ -21,7 +21,8 @@ class DatasetGenerator:
     
     def __init__(self, model_name: str, topic: str, input_template: str, 
                  output_template: str, existing_entries: List[Dict] = None, verbose: bool = False,
-                 use_multi_gpu: bool = True, max_gpus: Optional[int] = None, max_tokens: int = 512):
+                 use_multi_gpu: bool = True, max_gpus: Optional[int] = None, max_tokens: int = 512,
+                 variable_descriptions: Dict[str, str] = None):
         """
         Initialize the dataset generator.
         
@@ -35,6 +36,7 @@ class DatasetGenerator:
             use_multi_gpu: Enable multi-GPU support
             max_gpus: Maximum number of GPUs to use
             max_tokens: Maximum new tokens to generate per entry
+            variable_descriptions: Dictionary mapping variable names to their descriptions
         """
         self.model_name = model_name
         self.topic = topic
@@ -45,6 +47,7 @@ class DatasetGenerator:
         self.use_multi_gpu = use_multi_gpu
         self.max_gpus = max_gpus
         self.max_tokens = max_tokens
+        self.variable_descriptions = variable_descriptions or {}
         self.existing_hashes = set()
         self.device_info = self._detect_gpu_setup()
         
@@ -128,21 +131,32 @@ class DatasetGenerator:
             
             # Load model with appropriate device mapping
             model_kwargs = {
-                'torch_dtype': dtype,
+                'dtype': dtype,  # Fixed: torch_dtype is deprecated
                 'trust_remote_code': True,
                 'low_cpu_mem_usage': True
             }
             
-            if self.device_info['use_multi_gpu']:
-                # Multi-GPU setup
-                model_kwargs['device_map'] = 'auto'
+            if self.device_info['use_multi_gpu'] and self.device_info['available_gpus'] > 1:
+                # Multi-GPU setup - force model parallelism across all GPUs
+                num_gpus = self.device_info['available_gpus']
+                device_map = {}
+                
+                # Distribute model layers across all available GPUs
+                for i in range(num_gpus):
+                    device_map[f'cuda:{i}'] = f'cuda:{i}'
+                
+                model_kwargs['device_map'] = 'auto'  # Let transformers auto-distribute
                 if self.verbose:
-                    console.print(f"[green]Using multi-GPU setup with {self.device_info['available_gpus']} GPUs[/green]")
+                    console.print(f"[green]Using multi-GPU setup with {num_gpus} GPUs - model parallelism enabled[/green]")
             elif device == "cuda":
                 # Single GPU setup
                 model_kwargs['device_map'] = {'': 0}
                 if self.verbose:
                     console.print(f"[green]Using single GPU setup[/green]")
+            else:
+                # CPU-only setup - don't use device_map
+                if self.verbose:
+                    console.print(f"[yellow]Using CPU-only setup[/yellow]")
             
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
@@ -153,12 +167,14 @@ class DatasetGenerator:
             pipeline_kwargs = {
                 'model': self.model,
                 'tokenizer': self.tokenizer,
-                'torch_dtype': dtype,
                 'return_full_text': False
             }
             
+            # Only set device for single GPU, let multi-GPU handle itself
             if not self.device_info['use_multi_gpu'] and device == "cuda":
                 pipeline_kwargs['device'] = 0
+            elif device == "cpu":
+                pipeline_kwargs['device'] = -1  # CPU device
             
             self.generator = pipeline("text-generation", **pipeline_kwargs)
             
@@ -186,18 +202,35 @@ class DatasetGenerator:
 Template Variables:
 Your templates contain these variables: {', '.join(all_vars)}
 For each variable like {{variable_name}}, you must:
-1. Think of what that variable should represent based on the topic "{self.topic}"
-2. Replace it with appropriate, specific content
-3. Make sure the content fits naturally in the sentence
-4. Vary the content for each generation to create diversity
+1. Replace it with appropriate, specific content based on the descriptions below
+2. Make sure the content fits naturally in the sentence
+3. Vary the content for each generation to create diversity
+4. Keep content relevant to the topic "{self.topic}"
 
-For example:
-- {{task}} could be "create a list", "handle exceptions", "parse JSON", etc.
-- {{concept}} could be "inheritance", "recursion", "lambda functions", etc.
-- {{error}} could be "TypeError", "IndexError", "KeyError", etc.
-- {{action}} could be "running my script", "importing a module", "calling a function", etc.
-
-Always replace ALL variables with concrete, specific content related to "{self.topic}"."""
+Variable Descriptions:"""
+            
+            # Add user-provided descriptions or defaults
+            for var in all_vars:
+                if var in self.variable_descriptions:
+                    description = self.variable_descriptions[var]
+                else:
+                    # Provide smart defaults based on common variable names
+                    if var.lower() in ['task', 'action']:
+                        description = "specific programming task or action"
+                    elif var.lower() in ['problem', 'issue', 'error']:
+                        description = "specific problem, issue, or error type"
+                    elif var.lower() in ['concept', 'topic']:
+                        description = "programming concept or topic"
+                    elif var.lower() in ['fix', 'solution']:
+                        description = "detailed solution or fix"
+                    elif var.lower() in ['explanation', 'details']:
+                        description = "detailed explanation or implementation details"
+                    else:
+                        description = f"specific {var} related to {self.topic}"
+                
+                var_instructions += f"\n- {{{var}}}: {description}"
+            
+            var_instructions += f"\n\nAlways replace ALL variables with concrete, specific content. Make each generation unique and varied."
         
         return f"""You are a synthetic dataset generator. Your task is to generate training data for a conversational AI system.
 
@@ -220,7 +253,7 @@ Generate one complete conversation pair following this format:
 User: [Generated user message based on input template with variables filled]
 Assistant: [Generated assistant response based on output template with variables filled]
 
-Make sure to replace all {{variables}} with actual content related to "{self.topic}"."""
+Make sure to replace all {{variables}} with actual content according to their descriptions above."""
     
     def _extract_conversation_pair(self, generated_text: str) -> Optional[Tuple[str, str]]:
         """Extract user and assistant content from generated text."""
@@ -358,8 +391,19 @@ Make sure to replace all {{variables}} with actual content related to "{self.top
                     batch_size=min(batch_size, 4)  # Limit batch size to prevent OOM
                 )
                 
-                for i, response in enumerate(responses):
-                    generated_text = response['generated_text']
+                # Handle both single response and batch responses
+                if isinstance(responses, list):
+                    response_list = responses
+                else:
+                    response_list = [responses]
+                
+                for i, response in enumerate(response_list):
+                    if isinstance(response, dict) and 'generated_text' in response:
+                        generated_text = response['generated_text']
+                    elif isinstance(response, list) and len(response) > 0:
+                        generated_text = response[0]['generated_text']
+                    else:
+                        continue
                     
                     # Remove the system prompt from the generated text
                     if system_prompts[i] in generated_text:
@@ -377,11 +421,13 @@ Make sure to replace all {{variables}} with actual content related to "{self.top
                             entry_hash = self._hash_entry(user_content, assistant_content)
                             self.existing_hashes.add(entry_hash)
                             
-                            # Create the dataset entry
-                            entry = [
-                                {"content": user_content, "role": "user"},
-                                {"content": assistant_content, "role": "assistant"}
-                            ]
+                            # Create the dataset entry in messages format
+                            entry = {
+                                "messages": [
+                                    {"content": user_content, "role": "user"},
+                                    {"content": assistant_content, "role": "assistant"}
+                                ]
+                            }
                             generated_entries.append(entry)
                 
                 if generated_entries:
@@ -443,22 +489,24 @@ Make sure to replace all {{variables}} with actual content related to "{self.top
                         entry_hash = self._hash_entry(user_content, assistant_content)
                         self.existing_hashes.add(entry_hash)
                         
-                        # Create the dataset entry
-                        entry = [
-                            {
-                                "content": user_content,
-                                "role": "user"
-                            },
-                            {
-                                "content": assistant_content,
-                                "role": "assistant"
-                            }
-                        ]
+                        # Create the dataset entry in messages format
+                        entry = {
+                            "messages": [
+                                {
+                                    "content": user_content,
+                                    "role": "user"
+                                },
+                                {
+                                    "content": assistant_content,
+                                    "role": "assistant"
+                                }
+                            ]
+                        }
                         
                         if self.verbose:
                             console.print(f"[green]✓ Generated unique entry[/green]")
                         
-                        return entry
+                        return entry  # Return single entry
                     else:
                         if self.verbose:
                             console.print(f"[yellow]Entry not unique, retrying...[/yellow]")
