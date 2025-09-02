@@ -21,17 +21,60 @@ console = Console()
 @click.option('--output-template', '-o', required=True, help='Template for assistant output messages')
 @click.option('--model', '-m', default='Qwen/Qwen2.5-3B-Instruct', help='Model to use for generation')
 @click.option('--output-file', '-f', default='dataset.json', help='Output file for the generated dataset')
-@click.option('--num-entries', '-n', default=1, help='Number of dataset entries to generate')
+@click.option('--num-entries', '-n', default=None, help='Number of dataset entries to generate')
+@click.option('--max-tokens', default=None, help='Maximum new tokens to generate per entry')
+@click.option('--batch-size', '-b', default=1, help='Batch size for parallel generation (multi-GPU)')
+@click.option('--use-multi-gpu/--no-multi-gpu', default=True, help='Enable/disable multi-GPU support')
+@click.option('--max-gpus', type=int, help='Maximum number of GPUs to use')
 @click.option('--existing-file', '-e', help='Path to existing dataset file to avoid duplicates')
+@click.option('--interactive', '-I', is_flag=True, help='Run in interactive mode with prompts')
 @click.option('--verbose', '-v', is_flag=True, help='Enable verbose output')
 def generate(topic: str, input_template: str, output_template: str, model: str, 
-            output_file: str, num_entries: int, existing_file: Optional[str], verbose: bool):
-    """Generate synthetic dataset entries using an open-source language model."""
+            output_file: str, num_entries: Optional[int], max_tokens: Optional[int], batch_size: int, use_multi_gpu: bool, 
+            max_gpus: Optional[int], existing_file: Optional[str], interactive: bool, verbose: bool):
+    """Generate synthetic dataset entries using an open-source language model with multi-GPU support."""
     
     console.print(f"[bold blue]Synthetic Dataset Generator[/bold blue]")
     console.print(f"Topic: [green]{topic}[/green]")
     console.print(f"Model: [yellow]{model}[/yellow]")
+    
+    # Interactive prompts if enabled or values not provided
+    if interactive or num_entries is None:
+        if num_entries is None:
+            while True:
+                try:
+                    num_entries = int(console.input("[cyan]How many samples do you want to generate? [/cyan]"))
+                    if num_entries > 0:
+                        break
+                    else:
+                        console.print("[red]Please enter a positive number[/red]")
+                except ValueError:
+                    console.print("[red]Please enter a valid number[/red]")
+    
+    if interactive or max_tokens is None:
+        if max_tokens is None:
+            while True:
+                try:
+                    max_tokens = int(console.input("[cyan]Max new tokens per entry (default 512): [/cyan]") or "512")
+                    if max_tokens > 0:
+                        break
+                    else:
+                        console.print("[red]Please enter a positive number[/red]")
+                except ValueError:
+                    console.print("[red]Please enter a valid number[/red]")
+    
+    # Set defaults if still None
+    if num_entries is None:
+        num_entries = 1
+    if max_tokens is None:
+        max_tokens = 512
+    
     console.print(f"Entries to generate: [cyan]{num_entries}[/cyan]")
+    console.print(f"Max tokens per entry: [cyan]{max_tokens}[/cyan]")
+    console.print(f"Batch size: [cyan]{batch_size}[/cyan]")
+    console.print(f"Multi-GPU: [cyan]{use_multi_gpu}[/cyan]")
+    if max_gpus:
+        console.print(f"Max GPUs: [cyan]{max_gpus}[/cyan]")
     console.print()
     
     # Load existing dataset for uniqueness checking
@@ -53,7 +96,10 @@ def generate(topic: str, input_template: str, output_template: str, model: str,
         input_template=input_template,
         output_template=output_template,
         existing_entries=existing_entries,
-        verbose=verbose
+        verbose=verbose,
+        use_multi_gpu=use_multi_gpu,
+        max_gpus=max_gpus,
+        max_tokens=max_tokens
     )
     
     generated_entries = []
@@ -63,18 +109,34 @@ def generate(topic: str, input_template: str, output_template: str, model: str,
         TextColumn("[progress.description]{task.description}"),
         console=console
     ) as progress:
-        task = progress.add_task("Generating dataset entries...", total=num_entries)
+        # Calculate number of batches needed
+        num_batches = (num_entries + batch_size - 1) // batch_size
+        task = progress.add_task("Generating dataset entries...", total=num_batches)
         
-        for i in range(num_entries):
+        entries_generated = 0
+        for batch_idx in range(num_batches):
             try:
-                entry = generator.generate_entry()
-                if entry:
-                    generated_entries.extend(entry)
-                    progress.update(task, advance=1, description=f"Generated entry {i+1}/{num_entries}")
-                else:
-                    console.print(f"[red]Failed to generate entry {i+1}[/red]")
+                # Calculate entries for this batch
+                remaining_entries = num_entries - entries_generated
+                current_batch_size = min(batch_size, remaining_entries)
+                
+                # Generate batch
+                batch_entries = generator.generate_batch(current_batch_size)
+                
+                # Add successful entries
+                for entry in batch_entries:
+                    if entry:
+                        generated_entries.extend(entry)
+                        entries_generated += 1
+                
+                progress.update(task, advance=1, 
+                              description=f"Generated {entries_generated}/{num_entries} entries (batch {batch_idx+1}/{num_batches})")
+                
+                if len(batch_entries) < current_batch_size:
+                    console.print(f"[yellow]Warning: Only generated {len(batch_entries)}/{current_batch_size} entries in batch {batch_idx+1}[/yellow]")
+                    
             except Exception as e:
-                console.print(f"[red]Error generating entry {i+1}: {e}[/red]")
+                console.print(f"[red]Error generating batch {batch_idx+1}: {e}[/red]")
                 if verbose:
                     console.print_exception()
     
@@ -93,6 +155,8 @@ def generate(topic: str, input_template: str, output_template: str, model: str,
                 json.dump(all_entries, f, indent=2, ensure_ascii=False)
             
             console.print(f"[green]✓ Successfully generated {len(generated_entries)//2} dataset entries[/green]")
+            if use_multi_gpu and generator.device_info['use_multi_gpu']:
+                console.print(f"[green]✓ Used {generator.device_info['available_gpus']} GPUs for generation[/green]")
             console.print(f"[green]✓ Saved to: {output_path.absolute()}[/green]")
             
         except Exception as e:
